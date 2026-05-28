@@ -37,3 +37,13 @@ Thumbs.db
 
 # TypeScript
 *.tsbuildinfo
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+*.egg-info/
+
+# TripWe local DB
+backend/tripwe.db
+backend/tripwe.db-journal
