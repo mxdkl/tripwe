@@ -68,10 +68,10 @@ apt update && apt -y install caddy
 git clone https://github.com/YOUR_GITHUB/YOUR_REPO.git /opt/tripwe
 cd /opt/tripwe
 
-# Configure env (frontend origins for CORS, no trailing slash)
-cp .env.example .env
-# Edit .env and set TRIPWE_ALLOWED_ORIGINS to your real frontend domain(s)
-$EDITOR .env
+# Edit compose.yml — set TRIPWE_ALLOWED_ORIGINS to your real frontend
+# domain(s). Comma-separated, no trailing slashes, no spaces. Example:
+#   TRIPWE_ALLOWED_ORIGINS: "https://your-domain.com,https://www.your-domain.com"
+$EDITOR compose.yml
 
 # Build + start
 docker compose up -d --build
@@ -186,8 +186,7 @@ docker compose up -d --build
 ```
 
 `docker compose up -d --build` rebuilds the image and replaces the running
-container in one shot — the bind-mounted SQLite DB and your `.env` are
-untouched. Rollback is `git checkout <previous-commit> && docker compose up -d --build`.
+container in one shot — the bind-mounted SQLite DB is untouched. Rollback is `git checkout <previous-commit> && docker compose up -d --build`.
 
 The frontend redeploys automatically on every `git push` to `main`
 (Cloudflare Pages watches the repo).
@@ -233,8 +232,10 @@ reasonable recovery options.
   `docker compose ps` and `docker compose logs backend` from
   `/opt/tripwe`.
 - **CORS errors in browser console**: `TRIPWE_ALLOWED_ORIGINS` in
-  `/opt/tripwe/.env` doesn't include the frontend origin. Update it and
-  `docker compose up -d` (recreates the container with the new env).
+  `/opt/tripwe/compose.yml` doesn't match the frontend origin exactly
+  (watch for trailing slashes and `http` vs `https`). Edit it and
+  `docker compose up -d` (which recreates the container with the new env;
+  `docker compose restart` does NOT pick up changes).
 - **`cf-cache-status: BYPASS` on `/api/places*`**: Cache Rule isn't
   matching. Double-check the URI Path pattern and that `Hostname` matches
   exactly. Also check the response carries `Cache-Control: public, …` —
