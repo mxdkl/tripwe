@@ -1,4 +1,4 @@
-# TripWe 
+# TripWe
 
 Collaborative group travel, simplified. Tinder-style swiping on real places —
 when everyone in your group likes the same place, it's a match.
