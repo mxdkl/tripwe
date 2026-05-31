@@ -1,0 +1,33 @@
+# TripWe — single-service compose for the FastAPI backend.
+#
+# On the Droplet:
+#   echo "TRIPWE_ALLOWED_ORIGINS=https://your-domain.com" > .env
+#   docker compose up -d --build
+#
+# Caddy stays on the host (not containerized) and reverse-proxies to 127.0.0.1:8000.
+
+services:
+  backend:
+    build: ./backend
+    image: tripwe-backend:local
+    container_name: tripwe-backend
+    restart: unless-stopped
+    # Bind only to localhost so the world can't reach 8000 directly — Caddy
+    # on the host is the only thing that should talk to it.
+    ports:
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # SQLite DB lives on the host so `docker compose down`, image rebuilds,
+      # and container replacement never wipe data.
+      - ./data:/data
+    environment:
+      TRIPWE_DB: /data/tripwe.db
+      # Comma-separated frontend origins, no trailing slash.
+      # Set in .env next to this file.
+      TRIPWE_ALLOWED_ORIGINS: ${TRIPWE_ALLOWED_ORIGINS:-}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status==200 else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

@@ -47,3 +47,6 @@ __pycache__/
 # TripWe local DB
 backend/tripwe.db
 backend/tripwe.db-journal
+
+# Docker compose runtime data (bind-mounted SQLite, etc.)
+/data/

@@ -7,7 +7,7 @@ expensive `/api/places` endpoint.
 ```
 your-domain.com         → Cloudflare Pages (static site)
 api.your-domain.com     → Cloudflare DNS (proxied / orange cloud) → DO Droplet
-                            └─ Caddy (TLS) → uvicorn → SQLite (on disk)
+                            └─ Caddy (TLS) → docker (uvicorn) → SQLite on bind mount
 ```
 
 You'll need:
@@ -46,72 +46,46 @@ After it's up, copy its public IP into the Cloudflare `A` record above.
 
 ### 2b. Provision
 
-SSH in as root, then:
+The backend runs in a container; Caddy stays on the host as the
+TLS-terminating reverse proxy. SSH in as root, then:
 
 ```bash
 # System packages
 apt update && apt -y upgrade
 apt -y install git curl debian-keyring debian-archive-keyring apt-transport-https
 
-# Caddy (auto-TLS reverse proxy)
+# Docker Engine + Compose plugin (official one-liner)
+curl -fsSL https://get.docker.com | sh
+
+# Caddy (auto-TLS reverse proxy — on the HOST, not in a container)
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/gpg.key' \
   | gpg --dearmor -o /usr/share/keyrings/caddy-stable-archive-keyring.gpg
 curl -1sLf 'https://dl.cloudsmith.io/public/caddy/stable/debian.deb.txt' \
   | tee /etc/apt/sources.list.d/caddy-stable.list
 apt update && apt -y install caddy
 
-# uv (Python package manager)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-mv ~/.local/bin/uv /usr/local/bin/uv
-
-# App user + dirs
-useradd -m -s /bin/bash tripwe
-mkdir -p /var/lib/tripwe
-chown tripwe:tripwe /var/lib/tripwe
-
 # App code
-sudo -u tripwe -H bash -lc '
-  cd ~
-  git clone https://github.com/YOUR_GITHUB/YOUR_REPO.git app
-  cd app/backend
-  uv sync
-'
+git clone https://github.com/YOUR_GITHUB/YOUR_REPO.git /opt/tripwe
+cd /opt/tripwe
+
+# Configure env (frontend origins for CORS, no trailing slash)
+cp .env.example .env
+# Edit .env and set TRIPWE_ALLOWED_ORIGINS to your real frontend domain(s)
+$EDITOR .env
+
+# Build + start
+docker compose up -d --build
+docker compose ps                 # should show "running"
+docker compose logs -f backend    # tail logs (Ctrl-C to detach)
 ```
 
-### 2c. systemd service
+The compose file binds the container's port 8000 only to `127.0.0.1`, so
+the container is reachable from Caddy on the same host but not from the
+public internet. The SQLite DB lives in `/opt/tripwe/data/tripwe.db` via
+a bind mount, so `docker compose down`, image rebuilds, and container
+replacement never wipe data.
 
-Create `/etc/systemd/system/tripwe.service`:
-
-```ini
-[Unit]
-Description=TripWe FastAPI backend
-After=network.target
-
-[Service]
-Type=simple
-User=tripwe
-WorkingDirectory=/home/tripwe/app/backend
-Environment=TRIPWE_DB=/var/lib/tripwe/tripwe.db
-# Comma-separated list of frontend origins (no trailing slash)
-Environment=TRIPWE_ALLOWED_ORIGINS=https://your-domain.com,https://www.your-domain.com
-ExecStart=/usr/local/bin/uv run python -m uvicorn main:app --host 127.0.0.1 --port 8000
-Restart=on-failure
-RestartSec=3
-
-[Install]
-WantedBy=multi-user.target
-```
-
-Then:
-
-```bash
-systemctl daemon-reload
-systemctl enable --now tripwe
-systemctl status tripwe   # should be "active (running)"
-journalctl -u tripwe -f   # tail logs
-```
-
-### 2d. Caddy
+### 2c. Caddy
 
 Edit `/etc/caddy/Caddyfile`:
 
@@ -129,9 +103,8 @@ systemctl reload caddy
 ```
 
 Caddy will get a free Let's Encrypt cert for `api.your-domain.com`
-automatically (DNS-01 is not needed since you've already pointed the `A`
-record at the Droplet; Cloudflare's proxy will pass through Let's Encrypt
-HTTP-01 challenges by default).
+automatically (Cloudflare's proxy passes Let's Encrypt HTTP-01 challenges
+through by default).
 
 Smoke-test from your laptop:
 
@@ -140,7 +113,7 @@ curl -s https://api.your-domain.com/api/health
 # {"ok":true}
 ```
 
-### 2e. Firewall (optional but recommended)
+### 2d. Firewall (optional but recommended)
 
 ```bash
 ufw allow 22/tcp
@@ -207,24 +180,33 @@ To deploy backend changes:
 
 ```bash
 ssh root@your-droplet
-sudo -u tripwe -H bash -lc 'cd ~/app && git pull && cd backend && uv sync'
-systemctl restart tripwe
+cd /opt/tripwe
+git pull
+docker compose up -d --build
 ```
 
-The frontend redeploys automatically on every `git push` to `main`.
+`docker compose up -d --build` rebuilds the image and replaces the running
+container in one shot — the bind-mounted SQLite DB and your `.env` are
+untouched. Rollback is `git checkout <previous-commit> && docker compose up -d --build`.
+
+The frontend redeploys automatically on every `git push` to `main`
+(Cloudflare Pages watches the repo).
 
 ---
 
 ## 6. Backups
 
-The whole DB is a single SQLite file at `/var/lib/tripwe/tripwe.db`.
+The whole DB is a single SQLite file at `/opt/tripwe/data/tripwe.db`.
 
-Easy backup with cron — add to root's crontab (`crontab -e`):
+The container ships with sqlite3, so cron on the host can snapshot through
+`docker exec`. Add to root's crontab (`crontab -e`):
 
 ```cron
-# Nightly DB snapshot, keep 7 days
-0 3 * * * sqlite3 /var/lib/tripwe/tripwe.db ".backup '/var/lib/tripwe/backup-$(date +\%u).db'"
+# Nightly DB snapshot, rotate weekly (7 files, one per weekday)
+0 3 * * * docker exec tripwe-backend python -c "import sqlite3,sys; sqlite3.connect('/data/tripwe.db').backup(sqlite3.connect('/data/backup-' + sys.argv[1] + '.db'))" $(date +\%u)
 ```
+
+(Using Python's built-in `.backup()` avoids needing a sqlite3 CLI install.)
 
 DigitalOcean's weekly Droplet backups ($1.20/mo on a $6 Droplet) cover the
 whole disk; combined with the daily SQLite snapshots above, you've got
@@ -247,15 +229,19 @@ reasonable recovery options.
 
 ## Troubleshooting
 
-- **`502 Bad Gateway` from `api.your-domain.com`**: backend is down.
-  Check `systemctl status tripwe` and `journalctl -u tripwe`.
-- **CORS errors in browser console**: `TRIPWE_ALLOWED_ORIGINS` doesn't
-  include the frontend origin. Update the systemd unit and
-  `systemctl restart tripwe`.
+- **`502 Bad Gateway` from `api.your-domain.com`**: backend is down. Check
+  `docker compose ps` and `docker compose logs backend` from
+  `/opt/tripwe`.
+- **CORS errors in browser console**: `TRIPWE_ALLOWED_ORIGINS` in
+  `/opt/tripwe/.env` doesn't include the frontend origin. Update it and
+  `docker compose up -d` (recreates the container with the new env).
 - **`cf-cache-status: BYPASS` on `/api/places*`**: Cache Rule isn't
   matching. Double-check the URI Path pattern and that `Hostname` matches
   exactly. Also check the response carries `Cache-Control: public, …` —
   Cloudflare won't cache without it.
 - **Wikipedia images intermittently missing**: the resolver has a 5-second
-  per-place timeout. Restart the backend to invalidate the in-process cache
-  if you want to re-attempt.
+  per-place timeout. `docker compose restart backend` to invalidate the
+  in-process cache if you want to re-attempt.
+- **`Permission denied` on `./data/tripwe.db`**: on SELinux hosts
+  (uncommon on Ubuntu, but happens), the bind mount needs the `:Z` flag.
+  Edit `compose.yml`: change `./data:/data` to `./data:/data:Z`.
